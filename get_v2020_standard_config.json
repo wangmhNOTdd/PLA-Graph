@@ -1,0 +1,22 @@
+{
+    "train_set": "./datasets/v2020-other-PL/processed_get_format/train.pkl",
+    "valid_set": "./datasets/v2020-other-PL/processed_get_format/valid.pkl",
+    "save_dir": "./datasets/v2020-other-PL/processed_get_format/models/GET_standard",
+    "task": "PDBBind",
+    "lr": 0.0001,
+    "final_lr": 0.0001,
+    "max_epoch": 100,
+    "save_topk": 3,
+    "max_n_vertex_per_gpu": 1500,
+    "shuffle": true,
+    "model_type": "GET",
+    "hidden_size": 128,
+    "n_layers": 3,
+    "n_channel": 1,
+    "n_rbf": 32,
+    "cutoff": 7.0,
+    "radial_size": 64,
+    "k_neighbors": 9,
+    "n_head": 4,
+    "seed": 2023
+}
