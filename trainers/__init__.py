@@ -3,5 +3,6 @@
 from .abs_trainer import TrainConfig
 from .pretrain_trainer import PretrainTrainer
 from .affinity_trainer import AffinityTrainer
+from .eign_affinity_trainer import EIGNAffinityTrainer
 from .graph_classification_trainer import GraphClassificationTrainer
 from .graph_pair_classification_trainer import GraphPairClassificationTrainer

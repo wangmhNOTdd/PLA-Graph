@@ -2,6 +2,7 @@
 # -*- coding:utf-8 -*-
 """
 Training script for EIGN model on PDBbind identity30 dataset
+Optimized parameters based on original EIGN configuration
 """
 import os
 import json
@@ -21,14 +22,15 @@ from data.pdb_utils import VOCAB
 
 
 def train_eign_model():
-    """Train EIGN model with predefined configuration"""
+    """Train EIGN model with optimized configuration for PDBbind identity30"""
     
     # Load configuration
     config_path = "./eign_config.json"
     with open(config_path, 'r') as f:
         config = json.load(f)
     
-    # Convert config dict to args-like object        class Args:
+    # Convert config dict to args-like object
+    class Args:
         def __init__(self, config_dict):
             for key, value in config_dict.items():
                 setattr(self, key, value)
@@ -59,8 +61,10 @@ def train_eign_model():
     setup_seed(args.seed)
     VOCAB.load_tokenizer(args.fragment)
     
-    print_log(f"Training EIGN model on PDBBind identity30 dataset")
+    print_log(f"Training EIGN model on PDBBind identity30 dataset with optimized parameters")
     print_log(f"Configuration: {config}")
+    print_log(f"Key parameters - Hidden size: {args.hidden_size}, LR: {args.lr}, Batch size: {args.batch_size}")
+    print_log(f"Max epochs: {args.max_epoch}, Patience: {args.patience}, Dropout: {args.dropout}")
     
     # Create model
     model = models.create_model(args)
@@ -80,6 +84,7 @@ def train_eign_model():
         valid_set = DynamicBatchWrapper(valid_set, args.valid_max_n_vertex_per_gpu)
         args.batch_size, args.valid_batch_size = 1, 1
         args.num_workers = 1
+        print_log(f"Dynamic batching enabled with max {args.max_n_vertex_per_gpu} vertices per GPU")
     
     # Create data loaders
     collate_fn = train_set.collate_fn
@@ -103,7 +108,7 @@ def train_eign_model():
         collate_fn=collate_fn
     )
     
-    # Setup training
+    # Setup training configuration
     step_per_epoch = len(train_loader)
     train_config = trainers.TrainConfig(
         args.save_dir, 
@@ -119,8 +124,15 @@ def train_eign_model():
         final_lr=args.final_lr
     )
     
-    # Create trainer
-    trainer = trainers.AffinityTrainer(model, train_loader, valid_loader, train_config)
+    print_log(f"Training configuration:")
+    print_log(f"  - Steps per epoch: {step_per_epoch}")
+    print_log(f"  - Learning rate: {args.lr} -> {args.final_lr}")
+    print_log(f"  - Weight decay: {getattr(args, 'weight_decay', 1e-6)}")
+    print_log(f"  - Gradient clipping: {args.grad_clip}")
+    print_log(f"  - Warmup steps: {args.warmup}")
+    
+    # Create trainer - use EIGN-specific trainer for better optimization
+    trainer = trainers.EIGNAffinityTrainer(model, train_loader, valid_loader, train_config)
     
     # Move to GPU if available
     if torch.cuda.is_available() and args.gpus[0] >= 0:
@@ -130,9 +142,14 @@ def train_eign_model():
     else:
         print_log("Using CPU")
     
+    # Create save directory
+    os.makedirs(args.save_dir, exist_ok=True)
+    
     # Start training
     print_log("Starting training...")
+    print_log("=" * 50)
     trainer.train(args.gpus, args.local_rank)
+    print_log("=" * 50)
     print_log("Training completed!")
 
 
