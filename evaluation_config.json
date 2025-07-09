@@ -1,0 +1,52 @@
+{
+  "models": [
+    {
+      "name": "MACE_En_enhanced_bessel",
+      "model_type": "mace_en",
+      "checkpoint_path": "./checkpoints/mace_en_v2020/best_model.pth"
+    },
+    {
+      "name": "MACE_En_hybrid",
+      "model_type": "mace_en", 
+      "checkpoint_path": "./checkpoints/mace_en_v2020_hybrid/best_model.pth"
+    },
+    {
+      "name": "MACE_En_adaptive",
+      "model_type": "mace_en",
+      "checkpoint_path": "./checkpoints/mace_en_v2020_adaptive/best_model.pth"
+    },
+    {
+      "name": "MACE_standard_pdbbind",
+      "model_type": "mace",
+      "checkpoint_path": "./checkpoints/mace_pdbbind/best_model.pth"
+    },
+    {
+      "name": "MACE_gaussian_v1",
+      "model_type": "mace",
+      "checkpoint_path": "./checkpoints/mace_gaussian/version_1/best_model.pth"
+    },
+    {
+      "name": "MACE_gaussian_v0",
+      "model_type": "mace", 
+      "checkpoint_path": "./checkpoints/mace_gaussian/version_0/best_model.pth"
+    },
+    {
+      "name": "GET_pdbbind_standard",
+      "model_type": "get",
+      "checkpoint_path": "./checkpoints/get_pdbbind_standard/best_model.pth"
+    },
+    {
+      "name": "GET_v2020",
+      "model_type": "get",
+      "checkpoint_path": "./checkpoints/get_v2020/best_model.pth"
+    }
+  ],
+  "datasets": {
+    "v2020_test": "./datasets/v2020-other-PL/processed_get_format/test.pkl",
+    "v2020_valid": "./datasets/v2020-other-PL/processed_get_format/valid.pkl",
+    "pdbbind_identity30_test": "./datasets/PDBBind/processed/identity30/test.pkl",
+    "pdbbind_identity30_valid": "./datasets/PDBBind/processed/identity30/valid.pkl",
+    "pdbbind_identity60_test": "./datasets/PDBBind/processed/identity60/test.pkl",
+    "pdbbind_identity60_valid": "./datasets/PDBBind/processed/identity60/valid.pkl"
+  }
+}

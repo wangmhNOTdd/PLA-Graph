@@ -62,7 +62,7 @@ def parse():
                         help="Local rank. Necessary for using the torch.distributed.launch utility.")
     
     # model
-    parser.add_argument('--model_type', type=str, required=True, choices=['GET', 'GETPool', 'SchNet', 'EGNN', 'DimeNet', 'TorchMD', 'Equiformer', 'GemNet', 'MACE', 'LEFTNet', 'HEGN'], help='type of model to use')
+    parser.add_argument('--model_type', type=str, required=True, choices=['GET', 'GETPool', 'SchNet', 'EGNN', 'DimeNet', 'TorchMD', 'Equiformer', 'GemNet', 'MACE', 'MACE-En', 'LEFTNet', 'HEGN', 'EIGN'], help='type of model to use')
     parser.add_argument('--embed_dim', type=int, default=64, help='dimension of residue/atom embedding')
     parser.add_argument('--hidden_size', type=int, default=128, help='dimension of hidden states')
     parser.add_argument('--n_channel', type=int, default=1, help='number of channels')

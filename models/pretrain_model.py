@@ -165,12 +165,18 @@ class DenoisePretrainModel(nn.Module):
         elif model_type == 'MACE':
             from .MACE.encoder import MACEEncoder
             self.encoder = MACEEncoder(hidden_size, n_rbf, cutoff, n_layers)
+        elif model_type == 'MACE-En':
+            from .MACE_En.encoder import MACEEnEncoder  # Note: MACE_En not MACE-En due to Python import naming
+            self.encoder = MACEEnEncoder(hidden_size, n_rbf, cutoff, n_layers)
         elif model_type == 'LEFTNet':
             from .LEFTNet.encoder import LEFTNetEncoder
             self.encoder = LEFTNetEncoder(hidden_size, n_rbf, cutoff, n_layers)
         elif model_type == 'HEGN':
             from .HEGN.encoder import HEGNEncoder
             self.encoder = HEGNEncoder(hidden_size, edge_size, n_layers, n_egnn_layers)
+        elif model_type == 'EIGN':
+            from .EIGN.model import EIGNEncoder
+            self.encoder = EIGNEncoder(hidden_size, n_channel, radial_size, edge_size, k_neighbors, n_layers, dropout)
         else:
             raise NotImplementedError(f'Model type {model_type} not implemented!')
         
