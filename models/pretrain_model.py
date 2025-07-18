@@ -177,6 +177,18 @@ class DenoisePretrainModel(nn.Module):
         elif model_type == 'EIGN':
             from .EIGN.model import EIGNEncoder
             self.encoder = EIGNEncoder(hidden_size, n_channel, radial_size, edge_size, k_neighbors, n_layers, dropout)
+        elif model_type == 'DSAN':
+            from .DSAN.encoder import DSANEncoder
+            self.encoder = DSANEncoder(
+                hidden_size=hidden_size,
+                n_layers=n_layers,
+                num_heads=n_head,
+                k_neighbors=k_neighbors,
+                dropout=dropout,
+                use_geometry=True,
+                rbf_dim=radial_size,
+                cutoff=cutoff
+            )
         else:
             raise NotImplementedError(f'Model type {model_type} not implemented!')
         

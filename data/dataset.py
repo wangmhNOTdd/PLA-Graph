@@ -253,6 +253,10 @@ class PDBBindBenchmark(torch.utils.data.Dataset):
     def __len__(self):
         return len(self.data)
     
+    def _form_batch(self):
+        """空的_form_batch方法，用于兼容训练器"""
+        pass
+    
     def __getitem__(self, idx):
         '''
         an example of the returned data
