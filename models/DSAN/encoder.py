@@ -8,6 +8,7 @@ DSAN (Dual-Scale Attention Network) Encoder - 完整实现
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 from torch_scatter import scatter_mean, scatter_sum, scatter_max
 import numpy as np
 
@@ -338,9 +339,11 @@ class DSANLayer(nn.Module):
     1. PMA (池化多头注意力) - 块级消息提取
     2. ESA (边集合注意力) - 3D感知的块间信息交换  
     3. Geometry-Aware Cross-Attention - 几何感知的块内原子更新
+    
+    增强功能：显存管理和梯度检查点
     """
     def __init__(self, hidden_size, num_heads=8, k_neighbors=9, dropout=0.1, 
-                 use_geometry=True, rbf_dim=16, cutoff=10.0):
+                 use_geometry=True, rbf_dim=16, cutoff=10.0, memory_efficient=True):
         super().__init__()
         self.hidden_size = hidden_size
         self.num_heads = num_heads
@@ -349,6 +352,8 @@ class DSANLayer(nn.Module):
         self.use_geometry = use_geometry
         self.rbf_dim = rbf_dim
         self.cutoff = cutoff
+        self.memory_efficient = memory_efficient  # 显存优化开关
+        self.block_batch_size = 8  # 限制同时处理的块数
         
         # 1. PMA - 块级消息提取
         self.pma = SimplePMA(
@@ -376,8 +381,116 @@ class DSANLayer(nn.Module):
         self.ln_block = nn.LayerNorm(hidden_size)
         self.dropout_layer = nn.Dropout(dropout)
         
+        # 显存清理计数器
+        self._forward_count = 0
+        self._clear_cache_freq = 100
+        
+    def clear_memory_cache(self):
+        """清理GPU显存缓存"""
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            
+    def _memory_efficient_pma(self, atom_features, block_id, unique_blocks):
+        """显存优化的PMA块特征提取（禁用梯度检查点以避免形状不匹配）"""
+        device = atom_features.device
+        n_blocks = len(unique_blocks)
+        block_features_list = []
+        
+        # 小批次处理块特征提取
+        for i in range(0, n_blocks, self.block_batch_size):
+            end_idx = min(i + self.block_batch_size, n_blocks)
+            batch_blocks = unique_blocks[i:end_idx]
+            
+            batch_block_features = []
+            for block_idx in batch_blocks:
+                atom_mask = (block_id == block_idx)
+                atom_indices = atom_mask.nonzero(as_tuple=True)[0]
+                
+                if len(atom_indices) > 0:
+                    block_atom_features = atom_features[atom_indices].unsqueeze(0)
+                    
+                    # 暂时禁用梯度检查点以避免形状不匹配问题
+                    # TODO: 需要重新设计checkpoint策略来处理动态形状
+                    block_feature = self.pma(block_atom_features)
+                    
+                    batch_block_features.append(block_feature.squeeze(0).squeeze(0))
+                else:
+                    # 处理空块
+                    empty_feature = torch.zeros(self.hidden_size, device=device, dtype=atom_features.dtype)
+                    batch_block_features.append(empty_feature)
+            
+            block_features_list.extend(batch_block_features)
+            
+            # 清理临时变量
+            del batch_blocks, batch_block_features
+            
+            # 定期清理显存
+            if i % (2 * self.block_batch_size) == 0 and self.memory_efficient:
+                self.clear_memory_cache()
+        
+        return torch.stack(block_features_list) if block_features_list else torch.empty(0, self.hidden_size, device=device)
+    
+    def _memory_efficient_cross_attention(self, atom_features, atom_positions, 
+                                        updated_block_features, block_id, unique_blocks, geometry_cache):
+        """显存优化的几何感知交叉注意力"""
+        updated_atom_features = atom_features.clone()
+        n_blocks = len(unique_blocks)
+        
+        # 分批处理几何感知交叉注意力
+        for i in range(0, n_blocks, self.block_batch_size):
+            end_idx = min(i + self.block_batch_size, n_blocks)
+            
+            for j in range(i, end_idx):
+                if j >= len(unique_blocks):
+                    break
+                    
+                block_idx = unique_blocks[j]
+                mask_idx = j - i if j < len(geometry_cache['block_masks']) else 0
+                
+                if mask_idx < len(geometry_cache['block_masks']):
+                    mask = geometry_cache['block_masks'][mask_idx]
+                    atom_indices = mask.nonzero(as_tuple=True)[0]
+                    
+                    if len(atom_indices) > 0 and j < len(updated_block_features):
+                        block_atom_feat = atom_features[atom_indices]
+                        block_feature = updated_block_features[j]
+                        
+                        if mask_idx < len(geometry_cache['rbf_features']):
+                            rbf_feat = geometry_cache['rbf_features'][mask_idx]
+                            geom_feat = self.geo_cross_attn.geom_proj(rbf_feat)
+                            
+                            # 增强原子特征
+                            augmented_atom_feat = torch.cat([block_atom_feat, geom_feat], dim=1)
+                            
+                            # 暂时禁用梯度检查点以避免形状不匹配问题
+                            # 标准前向传播
+                            Q = self.geo_cross_attn.cross_attn_q(block_feature.unsqueeze(0))
+                            K = self.geo_cross_attn.cross_attn_k(augmented_atom_feat)
+                            V = self.geo_cross_attn.cross_attn_v(augmented_atom_feat)
+                            
+                            attention_scores = torch.matmul(Q, K.transpose(0, 1)) / np.sqrt(self.hidden_size)
+                            attention_weights = F.softmax(attention_scores, dim=1)
+                            context_vector = torch.matmul(attention_weights, V)
+                            
+                            atomic_update = self.geo_cross_attn.context_mlp(context_vector)
+                            atomic_update = atomic_update.expand(len(atom_indices), -1)
+                            
+                            enhanced_features = self.geo_cross_attn.ln_atom1(block_atom_feat + 
+                                                                           self.geo_cross_attn.dropout_layer(atomic_update))
+                            enhanced_features = self.geo_cross_attn.ln_atom2(enhanced_features + 
+                                                                           self.geo_cross_attn.dropout_layer(
+                                                                               self.geo_cross_attn.atomic_ffn(enhanced_features)))
+                            
+                            updated_atom_features[atom_indices] = enhanced_features
+            
+            # 定期清理显存
+            if i % (2 * self.block_batch_size) == 0 and self.memory_efficient:
+                self.clear_memory_cache()
+        
+        return updated_atom_features
+
     def vectorized_extract_block_features(self, atom_features, block_id):
-        """向量化的块特征提取"""
+        """向量化的块特征提取（用于小规模数据）"""
         device = atom_features.device
         unique_blocks = torch.unique(block_id)
         n_blocks = len(unique_blocks)
@@ -409,7 +522,7 @@ class DSANLayer(nn.Module):
         
     def forward(self, atom_features, atom_positions, block_id, inter_edges):
         """
-        优化的DSAN-v2层前向传播
+        优化的DSAN-v2层前向传播（支持显存管理）
         
         Args:
             atom_features: [N_atoms, hidden_size] 原子特征
@@ -420,9 +533,20 @@ class DSANLayer(nn.Module):
             updated_atom_features: [N_atoms, hidden_size] 更新后的原子特征
         """
         device = atom_features.device
+        unique_blocks = torch.unique(block_id)
+        n_blocks = len(unique_blocks)
         
-        # === 模块1: 向量化的PMA - 块级消息提取 ===
-        block_features, unique_blocks = self.vectorized_extract_block_features(atom_features, block_id)
+        # 增加计数器并定期清理显存
+        self._forward_count += 1
+        if self._forward_count % self._clear_cache_freq == 0 and self.memory_efficient:
+            self.clear_memory_cache()
+        
+        # === 模块1: 显存优化的PMA - 块级消息提取 ===
+        if self.memory_efficient and n_blocks > self.block_batch_size:
+            block_features = self._memory_efficient_pma(atom_features, block_id, unique_blocks)
+        else:
+            # 使用原有的向量化方法（小规模数据）
+            block_features, _ = self.vectorized_extract_block_features(atom_features, block_id)
         
         # === 模块2: ESA - 3D感知的块间信息交换 ===
         # 映射全局块ID到局部索引
@@ -439,7 +563,10 @@ class DSANLayer(nn.Module):
         
         if valid_edges:
             valid_edges = torch.tensor(valid_edges, device=device).T  # [2, n_valid_edges]
+            
+            # 暂时禁用梯度检查点以避免形状不匹配问题
             updated_block_features = self.esa(block_features, valid_edges)
+                
             updated_block_features = self.ln_block(block_features + self.dropout_layer(updated_block_features - block_features))
         else:
             updated_block_features = block_features
@@ -447,20 +574,30 @@ class DSANLayer(nn.Module):
         # === 预计算几何特征（一次性计算） ===
         geometry_cache = self.geo_cross_attn.batch_compute_geometry(atom_positions, block_id)
         
-        # === 模块3: 优化的几何感知块内原子更新 ===
-        updated_atom_features = self.geo_cross_attn(
-            atom_features, atom_positions, updated_block_features, block_id, geometry_cache
-        )
+        # === 模块3: 显存优化的几何感知块内原子更新 ===
+        if self.memory_efficient and n_blocks > self.block_batch_size:
+            updated_atom_features = self._memory_efficient_cross_attention(
+                atom_features, atom_positions, updated_block_features, block_id, unique_blocks, geometry_cache
+            )
+        else:
+            # 使用原有方法（小规模数据）
+            updated_atom_features = self.geo_cross_attn(
+                atom_features, atom_positions, updated_block_features, block_id, geometry_cache
+            )
+        
+        # 最终清理（可选）
+        if self.memory_efficient and self._forward_count % (self._clear_cache_freq // 2) == 0:
+            self.clear_memory_cache()
         
         return updated_atom_features
 
 
 class DSANEncoder(nn.Module):
     """
-    完整的DSAN编码器，严格按照DSAN.md设计实现
+    完整的DSAN编码器，支持显存优化
     """
     def __init__(self, hidden_size, n_layers=3, num_heads=8, k_neighbors=9, 
-                 dropout=0.1, use_geometry=True, rbf_dim=16, cutoff=10.0):
+                 dropout=0.1, use_geometry=True, rbf_dim=16, cutoff=10.0, memory_efficient=True):
         super().__init__()
         self.hidden_size = hidden_size
         self.n_layers = n_layers
@@ -470,6 +607,7 @@ class DSANEncoder(nn.Module):
         self.use_geometry = use_geometry
         self.rbf_dim = rbf_dim
         self.cutoff = cutoff
+        self.memory_efficient = memory_efficient
         
         # 堆叠多个DSAN层
         self.dsan_layers = nn.ModuleList([
@@ -480,7 +618,8 @@ class DSANEncoder(nn.Module):
                 dropout=dropout,
                 use_geometry=use_geometry,
                 rbf_dim=rbf_dim,
-                cutoff=cutoff
+                cutoff=cutoff,
+                memory_efficient=memory_efficient  # 传递显存优化参数
             ) for _ in range(n_layers)
         ])
         
