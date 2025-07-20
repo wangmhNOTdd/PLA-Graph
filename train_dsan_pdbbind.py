@@ -35,8 +35,8 @@ def main():
         "--final_lr", "0.0001", 
         "--max_epoch", "100",
         "--save_topk", "5",
-        "--batch_size", "1",  # 进一步减少到1，确保内存安全
-        "--valid_batch_size", "1",
+        "--batch_size", "4",  # 增加到4测试修复效果
+        "--valid_batch_size", "4",
         "--grad_clip", "1.0",
         "--warmup", "1000",
         "--shuffle",
@@ -54,7 +54,7 @@ def main():
     ]
     
     print("DSAN训练配置（显存优化）:")
-    print(f"   批次大小: 1 (最保守设置)")
+    print(f"   批次大小: 4 (测试修复效果)")
     print(f"   RBF维度: 16 (减少边特征)")
     print(f"   Cutoff距离: 8.0 (减少边数量)")
     print(f"   几何特征维度: 8 (减少计算)")

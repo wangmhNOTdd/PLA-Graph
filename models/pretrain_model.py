@@ -189,6 +189,22 @@ class DenoisePretrainModel(nn.Module):
                 rbf_dim=radial_size,
                 cutoff=cutoff
             )
+        elif model_type == 'GCNESA':
+            import sys
+            import os
+            gcn_esa_path = os.path.join(os.path.dirname(__file__), 'GCN+ESA')
+            sys.path.insert(0, gcn_esa_path)
+            from encoder import GCNESAEncoder
+            sys.path.remove(gcn_esa_path)
+            self.encoder = GCNESAEncoder(
+                hidden_size=hidden_size,
+                edge_size=edge_size,
+                n_layers=n_layers,
+                gcn_layers=2,  # number of GCN layers for atom pooling
+                num_heads=n_head,
+                sab_dropout=dropout,
+                graph_dim=hidden_size
+            )
         else:
             raise NotImplementedError(f'Model type {model_type} not implemented!')
         
