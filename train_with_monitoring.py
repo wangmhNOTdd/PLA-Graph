@@ -1,211 +1,309 @@
 #!/usr/bin/python
 # -*- coding:utf-8 -*-
+"""
+GCN+ESA模型训练脚本 - 带监控和可视化功能
+支持实时监控训练过程，保存训练指标，生成曲线图
+"""
+
 import os
 import sys
 import json
 import argparse
+import time
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from datetime import datetime
+import pandas as pd
+
 import torch
 from torch.utils.data import DataLoader
 import torch.nn as nn
 import torch.nn.functional as F
 from torch_scatter import scatter_mean, scatter_sum
 from torch_geometric.nn import GCNConv, radius_graph
-import matplotlib.pyplot as plt
-import numpy as np
-from collections import defaultdict
-import pickle
+from scipy.stats import pearsonr, spearmanr
 
 from utils.logger import print_log
 from utils.random_seed import setup_seed, SEED
-
 from data.dataset import PDBBindBenchmark
-import trainers
 from utils.nn_utils import count_parameters
 from data.pdb_utils import VOCAB
 
+# 设置中文字体
+plt.rcParams['font.sans-serif'] = ['SimHei', 'DejaVu Sans']
+plt.rcParams['axes.unicode_minus'] = False
+
 
 class TrainingMonitor:
-    """训练监控类，记录和可视化训练过程中的各项指标"""
+    """训练监控器 - 记录和可视化训练过程"""
     
-    def __init__(self, save_dir):
+    def __init__(self, save_dir, model_name="GCN+ESA"):
         self.save_dir = save_dir
-        self.history = defaultdict(list)
+        self.model_name = model_name
+        self.metrics_dir = os.path.join(save_dir, 'metrics')
+        self.plots_dir = os.path.join(save_dir, 'plots')
         
-    def log_epoch(self, epoch, train_loss, valid_metrics=None, test_metrics=None):
-        """记录每个epoch的指标"""
-        self.history['epoch'].append(epoch)
-        self.history['train_loss'].append(train_loss)
+        os.makedirs(self.metrics_dir, exist_ok=True)
+        os.makedirs(self.plots_dir, exist_ok=True)
         
-        if valid_metrics:
-            for key, value in valid_metrics.items():
-                self.history[f'valid_{key}'].append(value)
+        # 训练指标记录
+        self.train_metrics = {
+            'epoch': [],
+            'loss': [],
+            'lr': []
+        }
+        
+        # 验证指标记录
+        self.valid_metrics = {
+            'epoch': [],
+            'loss': [],
+            'pearson': [],
+            'spearman': [],
+            'rmse': [],
+            'mae': []
+        }
+        
+        # 测试指标记录
+        self.test_metrics = {}
+        
+        # 训练开始时间
+        self.start_time = time.time()
+        
+    def log_train_metrics(self, epoch, loss, lr):
+        """记录训练指标"""
+        self.train_metrics['epoch'].append(epoch)
+        self.train_metrics['loss'].append(loss)
+        self.train_metrics['lr'].append(lr)
+        
+    def log_valid_metrics(self, epoch, metrics):
+        """记录验证指标"""
+        self.valid_metrics['epoch'].append(epoch)
+        self.valid_metrics['loss'].append(metrics['loss'])
+        self.valid_metrics['pearson'].append(metrics['pearson'])
+        self.valid_metrics['spearman'].append(metrics['spearman'])
+        self.valid_metrics['rmse'].append(metrics['rmse'])
+        self.valid_metrics['mae'].append(metrics['mae'])
+        
+    def log_test_metrics(self, metrics):
+        """记录测试指标"""
+        self.test_metrics = metrics.copy()
+        
+    def save_metrics(self):
+        """保存所有指标到文件"""
+        # 保存训练指标
+        train_df = pd.DataFrame(self.train_metrics)
+        train_df.to_csv(os.path.join(self.metrics_dir, 'train_metrics.csv'), index=False)
+        
+        # 保存验证指标
+        if self.valid_metrics['epoch']:
+            valid_df = pd.DataFrame(self.valid_metrics)
+            valid_df.to_csv(os.path.join(self.metrics_dir, 'valid_metrics.csv'), index=False)
+        
+        # 保存测试指标
+        if self.test_metrics:
+            with open(os.path.join(self.metrics_dir, 'test_metrics.json'), 'w') as f:
+                json.dump(self.test_metrics, f, indent=2)
                 
-        if test_metrics:
-            for key, value in test_metrics.items():
-                self.history[f'test_{key}'].append(value)
-    
-    def save_history(self):
-        """保存训练历史"""
-        with open(os.path.join(self.save_dir, 'training_history.pkl'), 'wb') as f:
-            pickle.dump(dict(self.history), f)
+        # 保存训练摘要
+        training_time = time.time() - self.start_time
+        summary = {
+            'model': self.model_name,
+            'training_time_minutes': training_time / 60,
+            'total_epochs': len(self.train_metrics['epoch']),
+            'best_valid_loss': min(self.valid_metrics['loss']) if self.valid_metrics['loss'] else None,
+            'best_valid_pearson': max(self.valid_metrics['pearson']) if self.valid_metrics['pearson'] else None,
+            'test_metrics': self.test_metrics,
+            'timestamp': datetime.now().isoformat()
+        }
+        
+        with open(os.path.join(self.metrics_dir, 'training_summary.json'), 'w') as f:
+            json.dump(summary, f, indent=2)
     
     def plot_training_curves(self):
         """绘制训练曲线"""
-        # 设置中文字体
-        plt.rcParams['font.sans-serif'] = ['SimHei', 'DejaVu Sans']
-        plt.rcParams['axes.unicode_minus'] = False
-        
-        # 创建子图
-        fig, axes = plt.subplots(2, 3, figsize=(18, 12))
-        fig.suptitle('GCN+ESA 训练监控曲线', fontsize=16, fontweight='bold')
-        
-        epochs = self.history['epoch']
-        
-        # 1. 损失曲线
-        ax = axes[0, 0]
-        ax.plot(epochs, self.history['train_loss'], 'b-', label='训练损失', linewidth=2)
-        if 'valid_loss' in self.history:
-            ax.plot(epochs, self.history['valid_loss'], 'r-', label='验证损失', linewidth=2)
-        ax.set_xlabel('Epoch')
-        ax.set_ylabel('Loss')
-        ax.set_title('损失函数曲线')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-        
-        # 2. Pearson相关系数
-        ax = axes[0, 1]
-        if 'valid_pearson' in self.history:
-            ax.plot(epochs, self.history['valid_pearson'], 'g-', label='验证集', linewidth=2)
-        if 'test_pearson' in self.history:
-            ax.plot(epochs, self.history['test_pearson'], 'orange', label='测试集', linewidth=2)
-        ax.set_xlabel('Epoch')
-        ax.set_ylabel('Pearson Correlation')
-        ax.set_title('Pearson 相关系数')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-        
-        # 3. Spearman相关系数
-        ax = axes[0, 2]
-        if 'valid_spearman' in self.history:
-            ax.plot(epochs, self.history['valid_spearman'], 'purple', label='验证集', linewidth=2)
-        if 'test_spearman' in self.history:
-            ax.plot(epochs, self.history['test_spearman'], 'brown', label='测试集', linewidth=2)
-        ax.set_xlabel('Epoch')
-        ax.set_ylabel('Spearman Correlation')
-        ax.set_title('Spearman 相关系数')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-        
-        # 4. RMSE
-        ax = axes[1, 0]
-        if 'valid_rmse' in self.history:
-            ax.plot(epochs, self.history['valid_rmse'], 'red', label='验证集', linewidth=2)
-        if 'test_rmse' in self.history:
-            ax.plot(epochs, self.history['test_rmse'], 'darkred', label='测试集', linewidth=2)
-        ax.set_xlabel('Epoch')
-        ax.set_ylabel('RMSE')
-        ax.set_title('均方根误差 (RMSE)')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-        
-        # 5. MAE
-        ax = axes[1, 1]
-        if 'valid_mae' in self.history:
-            ax.plot(epochs, self.history['valid_mae'], 'cyan', label='验证集', linewidth=2)
-        if 'test_mae' in self.history:
-            ax.plot(epochs, self.history['test_mae'], 'darkcyan', label='测试集', linewidth=2)
-        ax.set_xlabel('Epoch')
-        ax.set_ylabel('MAE')
-        ax.set_title('平均绝对误差 (MAE)')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-        
-        # 6. 学习率曲线（如果有记录的话）
-        ax = axes[1, 2]
-        if 'learning_rate' in self.history:
-            ax.plot(epochs, self.history['learning_rate'], 'black', linewidth=2)
-            ax.set_xlabel('Epoch')
-            ax.set_ylabel('Learning Rate')
-            ax.set_title('学习率变化')
-            ax.set_yscale('log')
-        else:
-            # 显示最佳性能总结
-            if 'valid_pearson' in self.history:
-                best_epoch = np.argmax(self.history['valid_pearson'])
-                best_pearson = self.history['valid_pearson'][best_epoch]
-                best_spearman = self.history['valid_spearman'][best_epoch] if 'valid_spearman' in self.history else 0
-                best_rmse = self.history['valid_rmse'][best_epoch] if 'valid_rmse' in self.history else 0
-                
-                ax.text(0.1, 0.8, f'最佳验证性能:', fontsize=14, fontweight='bold', transform=ax.transAxes)
-                ax.text(0.1, 0.7, f'Epoch: {epochs[best_epoch]}', fontsize=12, transform=ax.transAxes)
-                ax.text(0.1, 0.6, f'Pearson: {best_pearson:.4f}', fontsize=12, transform=ax.transAxes)
-                ax.text(0.1, 0.5, f'Spearman: {best_spearman:.4f}', fontsize=12, transform=ax.transAxes)
-                ax.text(0.1, 0.4, f'RMSE: {best_rmse:.4f}', fontsize=12, transform=ax.transAxes)
-                
-                # 最终测试性能
-                if 'test_pearson' in self.history and len(self.history['test_pearson']) > 0:
-                    final_test_pearson = self.history['test_pearson'][-1]
-                    final_test_spearman = self.history['test_spearman'][-1] if 'test_spearman' in self.history else 0
-                    final_test_rmse = self.history['test_rmse'][-1] if 'test_rmse' in self.history else 0
-                    
-                    ax.text(0.1, 0.2, f'最终测试性能:', fontsize=14, fontweight='bold', transform=ax.transAxes)
-                    ax.text(0.1, 0.1, f'Pearson: {final_test_pearson:.4f}', fontsize=12, transform=ax.transAxes)
-                    ax.text(0.1, 0.05, f'Spearman: {final_test_spearman:.4f}', fontsize=12, transform=ax.transAxes)
-                    ax.text(0.1, 0.0, f'RMSE: {final_test_rmse:.4f}', fontsize=12, transform=ax.transAxes)
-            
-            ax.set_title('性能总结')
-            ax.set_xticks([])
-            ax.set_yticks([])
-        
-        ax.grid(True, alpha=0.3)
-        
-        plt.tight_layout()
-        plt.savefig(os.path.join(self.save_dir, 'training_curves.png'), dpi=300, bbox_inches='tight')
-        plt.savefig(os.path.join(self.save_dir, 'training_curves.pdf'), bbox_inches='tight')
-        print_log(f"训练曲线已保存到: {os.path.join(self.save_dir, 'training_curves.png')}")
-        
-        # 显示图表
-        try:
-            plt.show()
-        except:
-            print_log("无法显示图表，但已保存到文件")
-        
-        plt.close()
-    
-    def print_summary(self):
-        """打印训练总结"""
-        if not self.history['epoch']:
+        if not self.train_metrics['epoch']:
             return
             
-        print_log("\n" + "="*50)
-        print_log("训练总结")
-        print_log("="*50)
+        # 设置绘图样式
+        sns.set_style("whitegrid")
+        plt.style.use('seaborn-v0_8')
         
-        total_epochs = len(self.history['epoch'])
-        print_log(f"总训练轮数: {total_epochs}")
+        # 1. 训练和验证损失曲线
+        fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+        fig.suptitle(f'{self.model_name} 训练监控报告', fontsize=16, fontweight='bold')
         
-        if 'valid_pearson' in self.history:
-            best_epoch = np.argmax(self.history['valid_pearson'])
-            print_log(f"\n最佳验证性能 (Epoch {self.history['epoch'][best_epoch]}):")
-            print_log(f"  Pearson: {self.history['valid_pearson'][best_epoch]:.4f}")
-            if 'valid_spearman' in self.history:
-                print_log(f"  Spearman: {self.history['valid_spearman'][best_epoch]:.4f}")
-            if 'valid_rmse' in self.history:
-                print_log(f"  RMSE: {self.history['valid_rmse'][best_epoch]:.4f}")
-            if 'valid_mae' in self.history:
-                print_log(f"  MAE: {self.history['valid_mae'][best_epoch]:.4f}")
+        # 损失曲线
+        ax1 = axes[0, 0]
+        ax1.plot(self.train_metrics['epoch'], self.train_metrics['loss'], 
+                label='训练损失', color='blue', linewidth=2, marker='o', markersize=4)
+        if self.valid_metrics['epoch']:
+            ax1.plot(self.valid_metrics['epoch'], self.valid_metrics['loss'], 
+                    label='验证损失', color='red', linewidth=2, marker='s', markersize=4)
+        ax1.set_xlabel('Epoch')
+        ax1.set_ylabel('Loss')
+        ax1.set_title('训练和验证损失')
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
         
-        if 'test_pearson' in self.history and len(self.history['test_pearson']) > 0:
-            print_log(f"\n最终测试性能:")
-            print_log(f"  Pearson: {self.history['test_pearson'][-1]:.4f}")
-            if 'test_spearman' in self.history:
-                print_log(f"  Spearman: {self.history['test_spearman'][-1]:.4f}")
-            if 'test_rmse' in self.history:
-                print_log(f"  RMSE: {self.history['test_rmse'][-1]:.4f}")
-            if 'test_mae' in self.history:
-                print_log(f"  MAE: {self.history['test_mae'][-1]:.4f}")
+        # 学习率曲线
+        ax2 = axes[0, 1]
+        ax2.plot(self.train_metrics['epoch'], self.train_metrics['lr'], 
+                color='green', linewidth=2, marker='d', markersize=4)
+        ax2.set_xlabel('Epoch')
+        ax2.set_ylabel('Learning Rate')
+        ax2.set_title('学习率变化')
+        ax2.set_yscale('log')
+        ax2.grid(True, alpha=0.3)
         
-        print_log("="*50)
+        # Pearson相关系数
+        if self.valid_metrics['epoch']:
+            ax3 = axes[0, 2]
+            ax3.plot(self.valid_metrics['epoch'], self.valid_metrics['pearson'], 
+                    color='purple', linewidth=2, marker='^', markersize=4)
+            ax3.set_xlabel('Epoch')
+            ax3.set_ylabel('Pearson Correlation')
+            ax3.set_title('Pearson相关系数')
+            ax3.grid(True, alpha=0.3)
+            ax3.set_ylim([0, 1])
+        
+        # Spearman相关系数
+        if self.valid_metrics['epoch']:
+            ax4 = axes[1, 0]
+            ax4.plot(self.valid_metrics['epoch'], self.valid_metrics['spearman'], 
+                    color='orange', linewidth=2, marker='v', markersize=4)
+            ax4.set_xlabel('Epoch')
+            ax4.set_ylabel('Spearman Correlation')
+            ax4.set_title('Spearman相关系数')
+            ax4.grid(True, alpha=0.3)
+            ax4.set_ylim([0, 1])
+        
+        # RMSE
+        if self.valid_metrics['epoch']:
+            ax5 = axes[1, 1]
+            ax5.plot(self.valid_metrics['epoch'], self.valid_metrics['rmse'], 
+                    color='brown', linewidth=2, marker='>', markersize=4)
+            ax5.set_xlabel('Epoch')
+            ax5.set_ylabel('RMSE')
+            ax5.set_title('均方根误差')
+            ax5.grid(True, alpha=0.3)
+        
+        # MAE
+        if self.valid_metrics['epoch']:
+            ax6 = axes[1, 2]
+            ax6.plot(self.valid_metrics['epoch'], self.valid_metrics['mae'], 
+                    color='pink', linewidth=2, marker='<', markersize=4)
+            ax6.set_xlabel('Epoch')
+            ax6.set_ylabel('MAE')
+            ax6.set_title('平均绝对误差')
+            ax6.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(self.plots_dir, 'training_curves.png'), 
+                   dpi=300, bbox_inches='tight')
+        plt.savefig(os.path.join(self.plots_dir, 'training_curves.pdf'), 
+                   bbox_inches='tight')
+        plt.close()
+        
+    def plot_metrics_summary(self):
+        """绘制指标汇总图"""
+        if not self.valid_metrics['epoch']:
+            return
+            
+        # 创建指标汇总图
+        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+        fig.suptitle(f'{self.model_name} 验证指标汇总', fontsize=14, fontweight='bold')
+        
+        epochs = self.valid_metrics['epoch']
+        
+        # 相关系数对比
+        ax1 = axes[0, 0]
+        ax1.plot(epochs, self.valid_metrics['pearson'], label='Pearson', 
+                linewidth=2, marker='o', markersize=3)
+        ax1.plot(epochs, self.valid_metrics['spearman'], label='Spearman', 
+                linewidth=2, marker='s', markersize=3)
+        ax1.set_xlabel('Epoch')
+        ax1.set_ylabel('Correlation')
+        ax1.set_title('相关系数对比')
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+        ax1.set_ylim([0, 1])
+        
+        # 误差指标对比 (标准化)
+        ax2 = axes[0, 1]
+        rmse_norm = np.array(self.valid_metrics['rmse']) / np.max(self.valid_metrics['rmse'])
+        mae_norm = np.array(self.valid_metrics['mae']) / np.max(self.valid_metrics['mae'])
+        ax2.plot(epochs, rmse_norm, label='RMSE (normalized)', 
+                linewidth=2, marker='^', markersize=3)
+        ax2.plot(epochs, mae_norm, label='MAE (normalized)', 
+                linewidth=2, marker='v', markersize=3)
+        ax2.set_xlabel('Epoch')
+        ax2.set_ylabel('Normalized Error')
+        ax2.set_title('误差指标对比 (标准化)')
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
+        
+        # 最佳指标显示
+        ax3 = axes[1, 0]
+        best_metrics = {
+            'Best Pearson': f"{np.max(self.valid_metrics['pearson']):.4f}",
+            'Best Spearman': f"{np.max(self.valid_metrics['spearman']):.4f}",
+            'Best RMSE': f"{np.min(self.valid_metrics['rmse']):.4f}",
+            'Best MAE': f"{np.min(self.valid_metrics['mae']):.4f}",
+            'Best Loss': f"{np.min(self.valid_metrics['loss']):.4f}"
+        }
+        
+        y_pos = np.arange(len(best_metrics))
+        colors = ['skyblue', 'lightgreen', 'salmon', 'gold', 'lavender']
+        
+        for i, (metric, value) in enumerate(best_metrics.items()):
+            ax3.barh(i, 1, color=colors[i], alpha=0.7)
+            ax3.text(0.5, i, f"{metric}: {value}", ha='center', va='center', 
+                    fontweight='bold', fontsize=10)
+        
+        ax3.set_yticks(y_pos)
+        ax3.set_yticklabels(best_metrics.keys())
+        ax3.set_xlim(0, 1)
+        ax3.set_title('最佳验证指标')
+        ax3.set_xticks([])
+        
+        # 训练进度总结
+        ax4 = axes[1, 1]
+        training_time = (time.time() - self.start_time) / 60
+        total_epochs = len(self.train_metrics['epoch'])
+        avg_time_per_epoch = training_time / max(total_epochs, 1)
+        
+        summary_text = f"""
+训练总结:
+• 总训练时间: {training_time:.1f} 分钟
+• 训练轮数: {total_epochs}
+• 平均每轮时间: {avg_time_per_epoch:.2f} 分钟
+• 最佳验证损失: {np.min(self.valid_metrics['loss']):.4f}
+• 最佳Pearson: {np.max(self.valid_metrics['pearson']):.4f}
+• 最佳Spearman: {np.max(self.valid_metrics['spearman']):.4f}
+"""
+        
+        ax4.text(0.1, 0.5, summary_text, transform=ax4.transAxes, 
+                fontsize=12, verticalalignment='center',
+                bbox=dict(boxstyle="round,pad=0.3", facecolor="lightblue", alpha=0.7))
+        ax4.axis('off')
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(self.plots_dir, 'metrics_summary.png'), 
+                   dpi=300, bbox_inches='tight')
+        plt.close()
+        
+    def generate_report(self):
+        """生成完整的训练报告"""
+        self.save_metrics()
+        self.plot_training_curves()
+        self.plot_metrics_summary()
+        
+        print_log(f"训练报告已生成:")
+        print_log(f"  - 指标数据: {self.metrics_dir}")
+        print_log(f"  - 可视化图表: {self.plots_dir}")
+        
+        return self.test_metrics if self.test_metrics else None
 
 
 class SimpleGCNESAModel(nn.Module):
@@ -375,7 +473,7 @@ class SimpleGCNESAModel(nn.Module):
 
 
 def parse():
-    parser = argparse.ArgumentParser(description='Simple GCN+ESA Training')
+    parser = argparse.ArgumentParser(description='GCN+ESA Training with Monitoring')
     
     # Data
     parser.add_argument('--train_set', type=str, required=True)
@@ -400,6 +498,11 @@ def parse():
     # Device
     parser.add_argument('--gpus', type=int, nargs='+', required=True)
     parser.add_argument('--seed', type=int, default=SEED)
+    
+    # Monitoring
+    parser.add_argument('--model_name', type=str, default='GCN+ESA')
+    parser.add_argument('--plot_interval', type=int, default=5, 
+                       help='Plot training curves every N epochs')
     
     return parser.parse_args()
 
@@ -507,9 +610,6 @@ def evaluate(model, dataloader, device):
         return {'loss': float('inf'), 'pearson': 0, 'spearman': 0, 'rmse': float('inf'), 'mae': float('inf')}
     
     # Calculate metrics
-    import numpy as np
-    from scipy.stats import pearsonr, spearmanr
-    
     predictions = np.array(predictions)
     targets = np.array(targets)
     
@@ -535,11 +635,8 @@ def main():
     # Setup device
     device = torch.device(f'cuda:{args.gpus[0]}' if args.gpus[0] >= 0 else 'cpu')
     
-    # Create save directory
-    os.makedirs(args.save_dir, exist_ok=True)
-    
-    # Initialize training monitor
-    monitor = TrainingMonitor(args.save_dir)
+    # 创建监控器
+    monitor = TrainingMonitor(args.save_dir, args.model_name)
     
     # Create dataloaders
     train_loader = create_dataloader(args.train_set, args.batch_size, shuffle=True)
@@ -562,34 +659,34 @@ def main():
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=10, factor=0.5)
     
-    # Save training configuration
-    config = vars(args)
-    config['model_parameters'] = count_parameters(model)
-    with open(os.path.join(args.save_dir, 'config.json'), 'w') as f:
-        json.dump(config, f, indent=2)
-    
     # Training loop
     best_valid_loss = float('inf')
     patience_counter = 0
+    
+    os.makedirs(args.save_dir, exist_ok=True)
     
     for epoch in range(args.max_epoch):
         print_log(f'Epoch {epoch + 1}/{args.max_epoch}')
         
         # Train
         train_loss = train_epoch(model, train_loader, optimizer, device)
-        print_log(f'Train Loss: {train_loss:.4f}')
-        
-        # Get current learning rate
         current_lr = optimizer.param_groups[0]['lr']
         
+        print_log(f'Train Loss: {train_loss:.4f}, LR: {current_lr:.2e}')
+        
+        # 记录训练指标
+        monitor.log_train_metrics(epoch + 1, train_loss, current_lr)
+        
         # Validate
-        valid_metrics = None
         if valid_loader:
             valid_metrics = evaluate(model, valid_loader, device)
             print_log(f'Valid Loss: {valid_metrics["loss"]:.4f}, '
                      f'Pearson: {valid_metrics["pearson"]:.4f}, '
                      f'Spearman: {valid_metrics["spearman"]:.4f}, '
                      f'RMSE: {valid_metrics["rmse"]:.4f}')
+            
+            # 记录验证指标
+            monitor.log_valid_metrics(epoch + 1, valid_metrics)
             
             scheduler.step(valid_metrics['loss'])
             
@@ -603,41 +700,30 @@ def main():
             else:
                 patience_counter += 1
                 
+            # 定期生成中间报告
+            if (epoch + 1) % args.plot_interval == 0:
+                monitor.plot_training_curves()
+                print_log(f'Updated training curves at epoch {epoch + 1}')
+                
             if patience_counter >= args.patience:
                 print_log('Early stopping triggered')
                 break
-        
-        # Test (optional during training for monitoring)
-        test_metrics = None
-        if test_loader and (epoch + 1) % 5 == 0:  # Test every 5 epochs
-            test_metrics = evaluate(model, test_loader, device)
-            print_log(f'Test (Epoch {epoch+1}) - Pearson: {test_metrics["pearson"]:.4f}, '
-                     f'Spearman: {test_metrics["spearman"]:.4f}, RMSE: {test_metrics["rmse"]:.4f}')
-        
-        # Log metrics to monitor
-        monitor.log_epoch(epoch + 1, train_loss, valid_metrics, test_metrics)
-        
-        # Record learning rate
-        monitor.history['learning_rate'].append(current_lr)
     
-    # Final test evaluation
+    # Test
     if test_loader:
         model.load_state_dict(torch.load(os.path.join(args.save_dir, 'best_model.pth')))
-        final_test_metrics = evaluate(model, test_loader, device)
-        print_log(f'Final Test Results - Loss: {final_test_metrics["loss"]:.4f}, '
-                 f'Pearson: {final_test_metrics["pearson"]:.4f}, '
-                 f'Spearman: {final_test_metrics["spearman"]:.4f}, '
-                 f'RMSE: {final_test_metrics["rmse"]:.4f}')
+        test_metrics = evaluate(model, test_loader, device)
+        print_log(f'Test Results - Loss: {test_metrics["loss"]:.4f}, '
+                 f'Pearson: {test_metrics["pearson"]:.4f}, '
+                 f'Spearman: {test_metrics["spearman"]:.4f}, '
+                 f'RMSE: {test_metrics["rmse"]:.4f}')
         
-        # Log final test results
-        monitor.log_epoch(len(monitor.history['epoch']), 0, None, final_test_metrics)
+        # 记录测试指标
+        monitor.log_test_metrics(test_metrics)
     
-    # Save training history and generate plots
-    monitor.save_history()
-    monitor.plot_training_curves()
-    monitor.print_summary()
-    
-    print_log(f"训练完成! 所有结果保存在: {args.save_dir}")
+    # 生成完整报告
+    final_metrics = monitor.generate_report()
+    print_log("训练完成！完整的监控报告已生成。")
 
 
 if __name__ == '__main__':
