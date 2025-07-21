@@ -15,6 +15,8 @@ import numpy as np
 from collections import defaultdict
 import pickle
 import math
+from scipy.stats import pearsonr, spearmanr
+from sklearn.metrics import mean_squared_error, mean_absolute_error
 
 from utils.logger import print_log
 from utils.random_seed import setup_seed, SEED
@@ -282,13 +284,16 @@ class GeometricAtomProcessor(nn.Module):
             # Process messages
             messages = self.interaction_layers[layer_idx](edge_features)
             
-            # Aggregate messages
-            aggregated = torch.zeros_like(x)
-            aggregated.index_add_(0, i, messages)
+            # Aggregate messages using scatter_add for better memory efficiency
+            aggregated = scatter_sum(messages, i, dim=0, dim_size=num_atoms)
             
             # Update node features
             update_input = torch.cat([x, aggregated], dim=-1)
-            x = self.update_layers[layer_idx](update_input) + x  # Residual connection
+            x_new = self.update_layers[layer_idx](update_input)
+            x = x_new + x  # Residual connection
+            
+            # Clear intermediate variables to free memory
+            del x_i, x_j, edge_features, messages, aggregated, update_input, x_new
         
         return x
 
@@ -539,27 +544,58 @@ def main():
         train_losses = []
         
         for batch_idx, batch in enumerate(train_loader):
-            # 移动到设备
-            batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
-            
-            # 前向传播
-            optimizer.zero_grad()
-            loss = model(
-                batch['X'], batch['B'], batch['A'],
-                batch['atom_positions'], batch['block_lengths'],
-                batch['lengths'], batch['segment_ids'], batch['label']
-            )
-            
-            # 反向传播
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
-            
-            train_losses.append(loss.item())
-            
-            if (batch_idx + 1) % 10 == 0:
-                print(f"Epoch {epoch+1}/{args.epochs}, Batch {batch_idx+1}/{len(train_loader)}, Loss: {loss.item():.4f}")
+            try:
+                # 移动到设备
+                batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
+                
+                # 前向传播
+                optimizer.zero_grad()
+                loss = model(
+                    batch['X'], batch['B'], batch['A'],
+                    batch['atom_positions'], batch['block_lengths'],
+                    batch['lengths'], batch['segment_ids'], batch['label']
+                )
+                
+                # 检查loss是否有效
+                if torch.isnan(loss) or torch.isinf(loss):
+                    print(f"Warning: Invalid loss detected at epoch {epoch+1}, batch {batch_idx+1}")
+                    continue
+                
+                # 反向传播
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
+                
+                train_losses.append(loss.item())
+                
+                # 显式删除中间变量，释放显存
+                del loss
+                
+                if (batch_idx + 1) % 10 == 0:
+                    current_loss = train_losses[-1] if train_losses else 0.0
+                    print(f"Epoch {epoch+1}/{args.epochs}, Batch {batch_idx+1}/{len(train_loader)}, Loss: {current_loss:.4f}")
+                    
+                    # 每10个batch清理一次缓存
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                
+            except RuntimeError as e:
+                if "out of memory" in str(e):
+                    print(f"CUDA out of memory at epoch {epoch+1}, batch {batch_idx+1}")
+                    # 清理缓存并跳过这个batch
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    continue
+                else:
+                    raise e
+            except Exception as e:
+                print(f"Error in batch {batch_idx+1}: {str(e)}")
+                continue
         
+        if not train_losses:
+            print(f"No valid batches in epoch {epoch+1}, skipping...")
+            continue
+            
         avg_train_loss = np.mean(train_losses)
         
         # 验证阶段
@@ -569,26 +605,48 @@ def main():
         valid_labels = []
         
         with torch.no_grad():
-            for batch in valid_loader:
-                batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
-                
-                # 计算损失
-                loss = model(
-                    batch['X'], batch['B'], batch['A'],
-                    batch['atom_positions'], batch['block_lengths'],
-                    batch['lengths'], batch['segment_ids'], batch['label']
-                )
-                valid_losses.append(loss.item())
-                
-                # 获取预测
-                pred = model(
-                    batch['X'], batch['B'], batch['A'],
-                    batch['atom_positions'], batch['block_lengths'],
-                    batch['lengths'], batch['segment_ids']
-                )
-                valid_preds.extend(pred.cpu().numpy())
-                valid_labels.extend(batch['label'].cpu().numpy())
+            for batch_idx, batch in enumerate(valid_loader):
+                try:
+                    batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
+                    
+                    # 计算损失
+                    loss = model(
+                        batch['X'], batch['B'], batch['A'],
+                        batch['atom_positions'], batch['block_lengths'],
+                        batch['lengths'], batch['segment_ids'], batch['label']
+                    )
+                    
+                    if not (torch.isnan(loss) or torch.isinf(loss)):
+                        valid_losses.append(loss.item())
+                    
+                    # 获取预测
+                    pred = model(
+                        batch['X'], batch['B'], batch['A'],
+                        batch['atom_positions'], batch['block_lengths'],
+                        batch['lengths'], batch['segment_ids']
+                    )
+                    
+                    # 转移到CPU并添加到列表
+                    valid_preds.extend(pred.detach().cpu().numpy())
+                    valid_labels.extend(batch['label'].detach().cpu().numpy())
+                    
+                    # 显式删除中间变量
+                    del loss, pred
+                    
+                    # 定期清理缓存
+                    if (batch_idx + 1) % 5 == 0 and torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                        
+                except Exception as e:
+                    print(f"Error in validation batch {batch_idx+1}: {str(e)}")
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    continue
         
+        if not valid_losses:
+            print(f"No valid validation batches in epoch {epoch+1}")
+            continue
+            
         avg_valid_loss = np.mean(valid_losses)
         
         # 计算验证指标
