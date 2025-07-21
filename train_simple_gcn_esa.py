@@ -39,10 +39,20 @@ class TrainingMonitor:
         if valid_metrics:
             for key, value in valid_metrics.items():
                 self.history[f'valid_{key}'].append(value)
-                
+        
+        # 为了保持列表长度一致，在没有测试指标时添加None
         if test_metrics:
             for key, value in test_metrics.items():
+                if f'test_{key}' not in self.history:
+                    # 如果是第一次添加测试指标，需要填充之前的空值
+                    self.history[f'test_{key}'] = [None] * (len(self.history['epoch']) - 1)
                 self.history[f'test_{key}'].append(value)
+        else:
+            # 如果这个epoch没有测试指标，为已存在的测试指标添加None
+            for key in list(self.history.keys()):
+                if key.startswith('test_'):
+                    if len(self.history[key]) < len(self.history['epoch']):
+                        self.history[key].append(None)
     
     def save_history(self):
         """保存训练历史"""
@@ -74,10 +84,15 @@ class TrainingMonitor:
         
         # 2. Pearson相关系数
         ax = axes[0, 1]
-        if 'valid_pearson' in self.history:
-            ax.plot(epochs, self.history['valid_pearson'], 'g-', label='验证集', linewidth=2)
-        if 'test_pearson' in self.history:
-            ax.plot(epochs, self.history['test_pearson'], 'orange', label='测试集', linewidth=2)
+        if 'valid_pearson' in self.history and len(self.history['valid_pearson']) > 0:
+            valid_epochs = epochs[:len(self.history['valid_pearson'])]
+            ax.plot(valid_epochs, self.history['valid_pearson'], 'g-', label='验证集', linewidth=2)
+        if 'test_pearson' in self.history and len(self.history['test_pearson']) > 0:
+            # 只绘制在训练过程中记录的测试结果
+            test_data = [x for x in self.history['test_pearson'] if x is not None]
+            if test_data:
+                test_epochs = [epochs[i] for i in range(len(epochs)) if i < len(self.history['test_pearson']) and self.history['test_pearson'][i] is not None]
+                ax.plot(test_epochs, test_data, 'orange', label='测试集', linewidth=2, marker='o', markersize=4)
         ax.set_xlabel('Epoch')
         ax.set_ylabel('Pearson Correlation')
         ax.set_title('Pearson 相关系数')
@@ -86,10 +101,14 @@ class TrainingMonitor:
         
         # 3. Spearman相关系数
         ax = axes[0, 2]
-        if 'valid_spearman' in self.history:
-            ax.plot(epochs, self.history['valid_spearman'], 'purple', label='验证集', linewidth=2)
-        if 'test_spearman' in self.history:
-            ax.plot(epochs, self.history['test_spearman'], 'brown', label='测试集', linewidth=2)
+        if 'valid_spearman' in self.history and len(self.history['valid_spearman']) > 0:
+            valid_epochs = epochs[:len(self.history['valid_spearman'])]
+            ax.plot(valid_epochs, self.history['valid_spearman'], 'purple', label='验证集', linewidth=2)
+        if 'test_spearman' in self.history and len(self.history['test_spearman']) > 0:
+            test_data = [x for x in self.history['test_spearman'] if x is not None]
+            if test_data:
+                test_epochs = [epochs[i] for i in range(len(epochs)) if i < len(self.history['test_spearman']) and self.history['test_spearman'][i] is not None]
+                ax.plot(test_epochs, test_data, 'brown', label='测试集', linewidth=2, marker='o', markersize=4)
         ax.set_xlabel('Epoch')
         ax.set_ylabel('Spearman Correlation')
         ax.set_title('Spearman 相关系数')
@@ -98,10 +117,14 @@ class TrainingMonitor:
         
         # 4. RMSE
         ax = axes[1, 0]
-        if 'valid_rmse' in self.history:
-            ax.plot(epochs, self.history['valid_rmse'], 'red', label='验证集', linewidth=2)
-        if 'test_rmse' in self.history:
-            ax.plot(epochs, self.history['test_rmse'], 'darkred', label='测试集', linewidth=2)
+        if 'valid_rmse' in self.history and len(self.history['valid_rmse']) > 0:
+            valid_epochs = epochs[:len(self.history['valid_rmse'])]
+            ax.plot(valid_epochs, self.history['valid_rmse'], 'red', label='验证集', linewidth=2)
+        if 'test_rmse' in self.history and len(self.history['test_rmse']) > 0:
+            test_data = [x for x in self.history['test_rmse'] if x is not None]
+            if test_data:
+                test_epochs = [epochs[i] for i in range(len(epochs)) if i < len(self.history['test_rmse']) and self.history['test_rmse'][i] is not None]
+                ax.plot(test_epochs, test_data, 'darkred', label='测试集', linewidth=2, marker='o', markersize=4)
         ax.set_xlabel('Epoch')
         ax.set_ylabel('RMSE')
         ax.set_title('均方根误差 (RMSE)')
@@ -110,10 +133,14 @@ class TrainingMonitor:
         
         # 5. MAE
         ax = axes[1, 1]
-        if 'valid_mae' in self.history:
-            ax.plot(epochs, self.history['valid_mae'], 'cyan', label='验证集', linewidth=2)
-        if 'test_mae' in self.history:
-            ax.plot(epochs, self.history['test_mae'], 'darkcyan', label='测试集', linewidth=2)
+        if 'valid_mae' in self.history and len(self.history['valid_mae']) > 0:
+            valid_epochs = epochs[:len(self.history['valid_mae'])]
+            ax.plot(valid_epochs, self.history['valid_mae'], 'cyan', label='验证集', linewidth=2)
+        if 'test_mae' in self.history and len(self.history['test_mae']) > 0:
+            test_data = [x for x in self.history['test_mae'] if x is not None]
+            if test_data:
+                test_epochs = [epochs[i] for i in range(len(epochs)) if i < len(self.history['test_mae']) and self.history['test_mae'][i] is not None]
+                ax.plot(test_epochs, test_data, 'darkcyan', label='测试集', linewidth=2, marker='o', markersize=4)
         ax.set_xlabel('Epoch')
         ax.set_ylabel('MAE')
         ax.set_title('平均绝对误差 (MAE)')
@@ -143,10 +170,10 @@ class TrainingMonitor:
                 ax.text(0.1, 0.4, f'RMSE: {best_rmse:.4f}', fontsize=12, transform=ax.transAxes)
                 
                 # 最终测试性能
-                if 'test_pearson' in self.history and len(self.history['test_pearson']) > 0:
-                    final_test_pearson = self.history['test_pearson'][-1]
-                    final_test_spearman = self.history['test_spearman'][-1] if 'test_spearman' in self.history else 0
-                    final_test_rmse = self.history['test_rmse'][-1] if 'test_rmse' in self.history else 0
+                if 'final_test_pearson' in self.history:
+                    final_test_pearson = self.history['final_test_pearson']
+                    final_test_spearman = self.history.get('final_test_spearman', 0)
+                    final_test_rmse = self.history.get('final_test_rmse', 0)
                     
                     ax.text(0.1, 0.2, f'最终测试性能:', fontsize=14, fontweight='bold', transform=ax.transAxes)
                     ax.text(0.1, 0.1, f'Pearson: {final_test_pearson:.4f}', fontsize=12, transform=ax.transAxes)
@@ -195,15 +222,15 @@ class TrainingMonitor:
             if 'valid_mae' in self.history:
                 print_log(f"  MAE: {self.history['valid_mae'][best_epoch]:.4f}")
         
-        if 'test_pearson' in self.history and len(self.history['test_pearson']) > 0:
+        if 'final_test_pearson' in self.history:
             print_log(f"\n最终测试性能:")
-            print_log(f"  Pearson: {self.history['test_pearson'][-1]:.4f}")
-            if 'test_spearman' in self.history:
-                print_log(f"  Spearman: {self.history['test_spearman'][-1]:.4f}")
-            if 'test_rmse' in self.history:
-                print_log(f"  RMSE: {self.history['test_rmse'][-1]:.4f}")
-            if 'test_mae' in self.history:
-                print_log(f"  MAE: {self.history['test_mae'][-1]:.4f}")
+            print_log(f"  Pearson: {self.history['final_test_pearson']:.4f}")
+            if 'final_test_spearman' in self.history:
+                print_log(f"  Spearman: {self.history['final_test_spearman']:.4f}")
+            if 'final_test_rmse' in self.history:
+                print_log(f"  RMSE: {self.history['final_test_rmse']:.4f}")
+            if 'final_test_mae' in self.history:
+                print_log(f"  MAE: {self.history['final_test_mae']:.4f}")
         
         print_log("="*50)
 
@@ -273,9 +300,9 @@ class SimpleGCNESAModel(nn.Module):
         atom_batch_id = []
         atom_start = 0
         for i, block_length in enumerate(lengths):
-            n_atoms_in_batch = sum(block_lengths[atom_start:atom_start + block_length]).item()
+            n_atoms_in_batch = sum(block_lengths[atom_start:atom_start + block_length.item()])
             atom_batch_id.extend([i] * n_atoms_in_batch)
-            atom_start += block_length
+            atom_start += block_length.item()
         atom_batch_id = torch.tensor(atom_batch_id, dtype=torch.long, device=device)
         
         # Initial embeddings
@@ -629,8 +656,11 @@ def main():
                  f'Spearman: {final_test_metrics["spearman"]:.4f}, '
                  f'RMSE: {final_test_metrics["rmse"]:.4f}')
         
-        # Log final test results
-        monitor.log_epoch(len(monitor.history['epoch']), 0, None, final_test_metrics)
+        # 单独记录最终测试结果，不添加到epoch历史中
+        monitor.history['final_test_pearson'] = final_test_metrics["pearson"]
+        monitor.history['final_test_spearman'] = final_test_metrics["spearman"]
+        monitor.history['final_test_rmse'] = final_test_metrics["rmse"]
+        monitor.history['final_test_mae'] = final_test_metrics["mae"]
     
     # Save training history and generate plots
     monitor.save_history()

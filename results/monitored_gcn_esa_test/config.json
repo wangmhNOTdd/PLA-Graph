@@ -1,0 +1,21 @@
+{
+  "train_set": "datasets/PDBBind/processed/identity30/train.pkl",
+  "valid_set": "datasets/PDBBind/processed/identity30/valid.pkl",
+  "test_set": "datasets/PDBBind/processed/identity30/test.pkl",
+  "lr": 0.001,
+  "max_epoch": 3,
+  "batch_size": 4,
+  "save_dir": "./results/monitored_gcn_esa_test",
+  "patience": 10,
+  "hidden_size": 32,
+  "gcn_layers": 2,
+  "num_heads": 4,
+  "dropout": 0.1,
+  "cutoff": 6.0,
+  "k_neighbors": 8,
+  "gpus": [
+    0
+  ],
+  "seed": 12,
+  "model_parameters": 20833
+}
